@@ -18,6 +18,9 @@ import random
 from collections import defaultdict
 import argparse
 import os
+import scipy
+import sklearn
+
 
 CUDA = (torch.cuda.device_count() > 0)
 
@@ -146,8 +149,7 @@ def get_raw_data(people, papers):
     return out
 
 
-def sentences2ids(sentences):
-    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', do_lower_case=True)
+def sentences2ids(sentences, tokenizer):
 
     input_ids = []
 
@@ -182,12 +184,18 @@ if not os.path.exists(ARGS.working_dir):
     os.makedirs(ARGS.working_dir)
     os.makedirs(ARGS.working_dir + '/events')
 
+writer = SummaryWriter(ARGS.working_dir + '/events')
+
+
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', do_lower_case=True)
+
+
 if os.path.exists(ARGS.working_dir + "/data.cache.pkl"):
     data = pickle.load(open(ARGS.working_dir + "/data.cache.pkl", 'rb'))
     input_ids = pickle.load(open(ARGS.working_dir + "/ids.cache.pkl", 'rb'))
 else:
     data = get_raw_data(ARGS.people, ARGS.papers)
-    input_ids = sentences2ids(data['sentences'])
+    input_ids = sentences2ids(data['sentences'], tokenizer)
 
     pickle.dump(data, open(ARGS.working_dir + "/data.cache.pkl", 'wb'))
     pickle.dump(input_ids, open(ARGS.working_dir + "/ids.cache.pkl", 'wb'))
@@ -220,7 +228,6 @@ scheduler = get_linear_schedule_with_warmup(
 if CUDA:
     model = model.cuda()
 
-losses = []
 for epoch_i in range(0, ARGS.epochs):
     
     # ========================================
@@ -230,136 +237,108 @@ for epoch_i in range(0, ARGS.epochs):
     print('======== Epoch {:} / {:} ========'.format(epoch_i + 1, ARGS.epochs))
     print('Training...')
 
+    losses = []
     t0 = time.time()
-    total_loss = 0
     model.train()
     for step, batch in enumerate(train_dataloader):
         if step % 40 == 0 and not step == 0:
             elapsed = format_time(time.time() - t0)
-            print('  Batch {:>5,}  of  {:>5,}.    Elapsed: {:}. Loss: {.2f}'.format(
-                step, len(train_dataloader), elapsed, np.mean(losses)))
+            print('  Batch {:>5,}  of  {:>5,}.    Elapsed: {:}. Loss: {:.2f}'.format(
+                step, len(train_dataloader), elapsed, float(np.mean(losses))))
+        continue
+        if CUDA:
+            batch = (x.cuda() for x in batch)            
         input_ids, labels, masks = batch
 
-        b_input_ids = batch[0].to(device)
-        b_input_mask = batch[1].to(device)
-        b_labels = batch[2].to(device)
-
-        # Always clear any previously calculated gradients before performing a
-        # backward pass. PyTorch doesn't do this automatically because 
-        # accumulating the gradients is "convenient while training RNNs". 
-        # (source: https://stackoverflow.com/questions/48001598/why-do-we-need-to-call-zero-grad-in-pytorch)
         model.zero_grad()        
 
-        # Perform a forward pass (evaluate the model on this training batch).
-        # This will return the loss (rather than the model output) because we
-        # have provided the `labels`.
-        # The documentation for this `model` function is here: 
-        # https://huggingface.co/transformers/v2.2.0/model_doc/bert.html#transformers.BertForSequenceClassification
-        outputs = model(b_input_ids, 
-                    token_type_ids=None, 
-                    attention_mask=b_input_mask, 
-                    labels=b_labels)
+        outputs = model(
+            input_ids,
+            token_type_ids=None, 
+            attention_mask=masks, 
+            labels=labels)
         
-        # The call to `model` always returns a tuple, so we need to pull the 
-        # loss value out of the tuple.
-        loss = outputs[0]
+        loss, _, _ = outputs
+        losses.append(loss.item())
 
-        # Accumulate the training loss over all of the batches so that we can
-        # calculate the average loss at the end. `loss` is a Tensor containing a
-        # single value; the `.item()` function just returns the Python value 
-        # from the tensor.
-        total_loss += loss.item()
-
-        # Perform a backward pass to calculate the gradients.
         loss.backward()
-
-        # Clip the norm of the gradients to 1.0.
-        # This is to help prevent the "exploding gradients" problem.
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-
-        # Update parameters and take a step using the computed gradient.
-        # The optimizer dictates the "update rule"--how the parameters are
-        # modified based on their gradients, the learning rate, etc.
         optimizer.step()
-
-        # Update the learning rate.
         scheduler.step()
 
-    # Calculate the average loss over the training data.
-    avg_train_loss = total_loss / len(train_dataloader)            
-    
-    # Store the loss value for plotting the learning curve.
-    losses.append(avg_train_loss)
+    avg_loss = np.mean(losses)
+    writer.add_scalar('train/loss', np.mean(avg_loss), epoch)
 
     print("")
-    print("  Average training loss: {0:.2f}".format(avg_train_loss))
+    print("  Average training loss: {0:.2f}".format(avg_loss))
     print("  Training epcoh took: {:}".format(format_time(time.time() - t0)))
         
     # ========================================
     #               Validation
     # ========================================
-    # After the completion of each training epoch, measure our performance on
-    # our validation set.
-
     print("")
     print("Running Validation...")
 
     t0 = time.time()
-
-    # Put the model in evaluation mode--the dropout layers behave differently
-    # during evaluation.
     model.eval()
+    losses = []
+    all_preds = []
+    all_labels = []
+    log = open(ARGS.working_dir + '/epoch%d.log' % epoch_i, 'w')
+    for batch in test_dataloader:
 
-    # Tracking variables 
-    eval_loss, eval_accuracy = 0, 0
-    nb_eval_steps, nb_eval_examples = 0, 0
+        if CUDA:
+            batch = (x.cuda() for x in batch)            
+        input_ids, labels, masks = batch
 
-    # Evaluate data for one epoch
-    for batch in validation_dataloader:
-        
-        # Add batch to GPU
-        batch = tuple(t.to(device) for t in batch)
-        
-        # Unpack the inputs from our dataloader
-        b_input_ids, b_input_mask, b_labels = batch
-        
-        # Telling the model not to compute or store gradients, saving memory and
-        # speeding up validation
         with torch.no_grad():        
+            outputs = model(
+                input_ids,
+                token_type_ids=None, 
+                attention_mask=masks, 
+                labels=labels)
+        loss, logits, attns = outputs
 
-            # Forward pass, calculate logit predictions.
-            # This will return the logits rather than the loss because we have
-            # not provided labels.
-            # token_type_ids is the same as the "segment ids", which 
-            # differentiates sentence 1 and 2 in 2-sentence tasks.
-            # The documentation for this `model` function is here: 
-            # https://huggingface.co/transformers/v2.2.0/model_doc/bert.html#transformers.BertForSequenceClassification
-            outputs = model(b_input_ids, 
-                            token_type_ids=None, 
-                            attention_mask=b_input_mask)
-        
-        # Get the "logits" output by the model. The "logits" are the output
-        # values prior to applying an activation function like the softmax.
-        logits = outputs[0]
+        losses.append(loss.item())
 
-        # Move logits and labels to CPU
-        logits = logits.detach().cpu().numpy()
-        label_ids = b_labels.to('cpu').numpy()
-        print(logits)
-        print(label_ids)
-        # Calculate the accuracy for this batch of test sentences.
-        tmp_eval_accuracy = flat_accuracy(logits, label_ids)
-        
-        # Accumulate the total accuracy.
-        eval_accuracy += tmp_eval_accuracy
+        labels = labels.cpu().numpy()
+        input_ids = input_ids.cpu().numpy()
+        preds = scipy.special.softmax(logits.cpu().numpy(), axis=1)
+        input_toks = [
+            tokenizer.convert_ids_to_tokens(s) for s in input_ids
+        ]
 
-        # Track the number of batches
-        nb_eval_steps += 1
+        for seq, label, pred in zip(input_toks, labels, preds):
+            sep_char = '+' if np.argmax(pred) == label else '-'
+            log.write(sep_char * 40 + '\n')
+            log.write(' '.join(seq))
+            log.write('label: ' + str(label) + '\n')
+            log.write('pred: ' + str(np.argmax(pred)) + '\n')
+            log.write('dist: ' + str(pred) + '\n')
+            log.write('\n\n')
 
-    # Report the final accuracy for this validation run.
-    print("  Accuracy: {0:.2f}".format(eval_accuracy/nb_eval_steps))
+            all_preds += [pred]
+            all_labels += [label]
+    log.close()
+    all_preds = np.array(all_preds)
+    all_labels = np.array(all_labels)
+
+    avg_loss = np.mean(losses)
+    f1 = sklearn.metrics.f1_score(all_labels, np.argmax(all_preds, axis=1))
+    acc = sklearn.metrics.accuracy_score(all_labels, np.argmax(all_preds, axis=1))
+    auc = sklearn.metrics.roc_auc_score(all_labels, all_preds[:, 1])
+
+    writer.add_scalar('eval/acc', acc, epoch)
+    writer.add_scalar('eval/auc', auc, epoch)
+    writer.add_scalar('eval/f1', f1, epoch)
+    writer.add_scalar('eval/loss', f1, epoch)
+
+    print("  Loss: {0:.2f}".format(avg_loss))
+    print("  Accuracy: {0:.2f}".format(acc))
+    print("  F1: {0:.2f}".format(f1))
+    print("  AUC: {0:.2f}".format(auc))
     print("  Validation took: {:}".format(format_time(time.time() - t0)))
 
 print("")
-print("Training complete!")
+print("Done!")
 

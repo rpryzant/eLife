@@ -23,10 +23,10 @@ from sklearn.metrics import roc_auc_score, make_scorer, accuracy_score, f1_score
 
 import numpy as np
 
-with open('processed/papers.json') as f:
+with open('data/processed/papers.json') as f:
     papers = json.load(f)
     
-with open('processed/people.json') as f:
+with open('data/processed/people.json') as f:
     people = json.load(f)
 
 
@@ -88,7 +88,7 @@ for pid, paper_info in papers.items():
             university = 'none'
         experience = math.log(len(people[consult['author']]['pids']))
 
-        meta_covariates.append((time + ' ' + university + ' ' + gender + ' author_' + str(author) + ' ' + order))
+        meta_covariates.append((time + ' ' + university + ' ' + gender + ' author_' + str(author), experience))
 
 
 

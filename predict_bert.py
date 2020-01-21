@@ -4,7 +4,7 @@ try and predict which comments belong to winners with bert
 """
 import argparse
 from transformers import BertTokenizer
-from transformers.modeling_bert import BertPreTrainedModel, BertModel, BertSelfAttention
+from transformers.modeling_bert import BertPreTrainedModel, BertModel, BertSelfAttention, BertForSequenceClassification
 from transformers.optimization import AdamW, get_linear_schedule_with_warmup
 import os
 import json
@@ -31,13 +31,13 @@ parser = argparse.ArgumentParser()
 # Required parameters
 parser.add_argument(
     "--papers",
-    default="processed/papers.json",
+    default="data/processed/papers.json",
     type=str,
     help="path to papers json"
 )
 parser.add_argument(
     "--people",
-    default="processed/people.json",
+    default="data/processed/people.json",
     type=str,
     help="path to papers json"
 )
@@ -67,13 +67,13 @@ parser.add_argument(
 )
 parser.add_argument(
     "--batch_size",
-    default=16,
+    default=8,
     type=int,
     help="fine tuning epochs"
 )
 parser.add_argument(
     "--learning_rate",
-    default=1e-3,
+    default=1e-5,
     type=int,
     help="fine tuning epochs"
 )
@@ -137,12 +137,14 @@ def get_examples(people, papers, tokenizer, max_seq_len):
             input_toks = [cls_tok] + input_toks
             segment_ids =  [segment_ids[0]] + segment_ids
 
+            # build mask
+            input_mask = ([1] * len(input_toks)) + ([0] * (max_seq_len - len(input_toks)))
+
             # back-pad
             input_toks = pad(input_toks, pad_tok)
             segment_ids = pad(segment_ids, 0)
 
 
-            input_mask = ([1] * len(input_toks)) + ([0] * (max_seq_len - len(input_toks)))
             input_ids = tokenizer.convert_tokens_to_ids(input_toks)
 
             assert len(input_ids) == max_seq_len
@@ -209,7 +211,6 @@ class Bert(BertPreTrainedModel):
 
         cls_logits = self.cls_classifier(pooled_output)
         cls_logits = self.cls_dropout(cls_logits)
-
         return cls_logits
 
 def build_optimizer_scheduler(model, num_train_steps, learning_rate):
@@ -238,19 +239,22 @@ def build_loss_fn(debias_weight=None, num_labels=2):
 
 
 def train_for_epoch(model, train_dataloader, loss_fn, optimizer, scheduler):
-   
     losses = []
-    
     for step, batch in enumerate(tqdm(train_dataloader)):
-        if step > 2: break
+        # if step > 1: break
         if CUDA:
             batch = tuple(x.cuda() for x in batch)
         input_ids, input_masks, segment_ids, labels = batch
-
-        logits = model(input_ids, segment_ids, input_masks)
-        loss = loss_fn(logits, labels)
+        loss, logits = model(
+            input_ids, labels=labels)
+        print('TRAIN')
+        print(input_ids)
+        print(loss)
+        print(logits)
+        print(labels)
+        # loss = loss_fn(logits, labels)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         optimizer.step()
         scheduler.step()
 
@@ -277,14 +281,21 @@ def run_inference(model, eval_dataloader, loss_fn, tokenizer, epoch=0):
     all_preds = []
     all_losses = []
     for step, batch in enumerate(tqdm(eval_dataloader)):
-        if step > 2: break
+        # if step > 1: break
         if CUDA:
             batch = tuple(x.cuda() for x in batch)
         input_ids, input_masks, segment_ids, labels = batch
-
         with torch.no_grad():
-            logits = model(input_ids, segment_ids, input_masks)
-            loss = loss_fn(logits, labels)
+            loss, logits = model(input_ids, labels=labels)
+            # print(input_ids)
+            # print(labels)\
+            print('EVAL')
+            print(input_ids)
+            print(loss)
+            print(labels)
+            print(logits)
+            print('#' * 100)
+            # loss = loss_fn(logits, labels)
         input_toks = [
             tokenizer.convert_ids_to_tokens(seq) for seq in input_ids.cpu().numpy()
         ]
@@ -338,17 +349,17 @@ test_papers = papers[-200:]
 
 print("BUILDING TRAIN DATA...")
 train_iterator, num_train_examples = get_dataloader(
-    ARGS.people, train_papers, tokenizer, 16, 
+    ARGS.people, train_papers, tokenizer, ARGS.batch_size, 
     ARGS.working_dir + '/data_cache.train.pkl', test=False)
 print('DONE. %d EXAMPLES' % num_train_examples)
 print("BUILDING TEST DATA...")
 test_iterator, num_test_examples = get_dataloader(
-    ARGS.people, test_papers, tokenizer, 16, 
+    ARGS.people, test_papers, tokenizer, ARGS.batch_size, 
     ARGS.working_dir + '/data_cache.test.pkl', 
     test=True)
 print('DONE. %d EXAMPLES' % num_test_examples)
 
-model = Bert.from_pretrained(
+model = BertForSequenceClassification.from_pretrained(
     'bert-base-uncased',
     cache_dir=ARGS.working_dir + '/cache')
 if CUDA:
@@ -362,15 +373,18 @@ optimizer, scheduler = build_optimizer_scheduler(
 loss_fn = build_loss_fn()
 
 for epoch in range(ARGS.epochs):
-    print('TRAIN %d' % epoch)
-    losses = train_for_epoch(model, test_iterator, loss_fn, optimizer, scheduler)
-    writer.add_scalar('train/loss', np.mean(losses), epoch + 1)
-    print('EVAL')
-    model.eval()
-    acc, f1, auc = run_inference(model, test_iterator, loss_fn, tokenizer, epoch=epoch)
-    writer.add_scalar('eval/acc', acc, epoch + 1)
-    writer.add_scalar('eval/auc', auc, epoch + 1)
-    writer.add_scalar('eval/f1', f1, epoch + 1)
+    while True:
+        print('TRAIN %d' % epoch)
+        model.train()
+        losses = train_for_epoch(model, test_iterator, loss_fn, optimizer, scheduler)
+        # losses = [0]
+        writer.add_scalar('train/loss', np.mean(losses), epoch + 1)
+        print('EVAL')
+        model.eval()
+        acc, f1, auc = run_inference(model, test_iterator, loss_fn, tokenizer, epoch=epoch)
+        writer.add_scalar('eval/acc', acc, epoch + 1)
+        writer.add_scalar('eval/auc', auc, epoch + 1)
+        writer.add_scalar('eval/f1', f1, epoch + 1)
 
 
 writer.close()

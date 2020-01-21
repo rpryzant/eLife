@@ -1,6 +1,6 @@
-# from https://colab.research.google.com/drive/1Y4o3jh3ZH70tl6mCd76vz_IxX23biCPP#scrollTo=68xreA9JAmG5
-
-
+# combining 3 and 2
+from tqdm import tqdm
+import json
 import torch
 import pandas as pd
 from transformers import BertTokenizer
@@ -15,7 +15,6 @@ import datetime
 import random
 
 CUDA = (torch.cuda.device_count() > 0)
-
 
 
 # Function to calculate the accuracy of our predictions vs labels
@@ -52,15 +51,55 @@ else:
 
 
 
-# Load the dataset into a pandas dataframe.
-df = pd.read_csv("./cola_public/raw/in_domain_train.tsv", delimiter='\t', header=None, names=['sentence_source', 'label', 'label_notes', 'sentence'])
 
-# Report the number of sentences.
-print('Number of training sentences: {:,}\n'.format(df.shape[0]))
 
-# Get the lists of sentences and their labels.
-sentences = df.sentence.values
-labels = df.label.values
+
+
+
+
+
+
+
+
+def get_sentences_labels(people, papers):
+    sentences = []
+    labels = []
+
+    with open(people) as f:
+        people = json.load(f)
+    with open(papers) as f:
+        papers = list(json.load(f).items())
+
+    for pid, paper_info in tqdm(papers):
+        winners = paper_info["winning_reviewers"]
+        losers = paper_info["losing_reviewers"]
+        if paper_info["review_consults"] is None:
+            continue
+        for i, consult in enumerate(paper_info["review_consults"]):
+
+            author = consult["author"]
+            author_info = people.get(author, None)
+            if author_info is None:
+                continue
+            # if author not in winners + losers:
+            #     continue
+
+            text = consult["text"]
+            label = int(author in winners)
+
+            if label == 0 and random.random() > 0.4:
+                continue    
+
+            sentences.append(text)
+            labels.append(int(author in winners))
+
+    return sentences, labels
+
+
+sentences, labels = get_sentences_labels(
+    "data/processed/people.json",
+    "data/processed/papers.json")
+
 
 
 # Load the BERT tokenizer.

@@ -11,6 +11,7 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
 from transformers import BertForSequenceClassification, AdamW, BertConfig
 from transformers import get_linear_schedule_with_warmup
+from tensorboardX import SummaryWriter
 import numpy as np
 import time
 import datetime
@@ -133,14 +134,14 @@ def get_raw_data(people, papers):
             author_info = people.get(author, None)
             if author_info is None:
                 continue
-            # if author not in winners + losers:
-            #     continue
+            if author not in winners + losers:
+                continue
 
             text = consult["text"]
             label = int(author in winners)
 
-            if label == 0 and random.random() > 0.4:
-                continue    
+            # if label == 0 and random.random() > 0.4:
+            #     continue    
 
 
             out['sentences'].append(text)
@@ -245,7 +246,7 @@ for epoch_i in range(0, ARGS.epochs):
             elapsed = format_time(time.time() - t0)
             print('  Batch {:>5,}  of  {:>5,}.    Elapsed: {:}. Loss: {:.2f}'.format(
                 step, len(train_dataloader), elapsed, float(np.mean(losses))))
-        continue
+
         if CUDA:
             batch = (x.cuda() for x in batch)            
         input_ids, labels, masks = batch
@@ -267,7 +268,7 @@ for epoch_i in range(0, ARGS.epochs):
         scheduler.step()
 
     avg_loss = np.mean(losses)
-    writer.add_scalar('train/loss', np.mean(avg_loss), epoch)
+    writer.add_scalar('train/loss', np.mean(avg_loss), epoch_i)
 
     print("")
     print("  Average training loss: {0:.2f}".format(avg_loss))
@@ -311,7 +312,7 @@ for epoch_i in range(0, ARGS.epochs):
         for seq, label, pred in zip(input_toks, labels, preds):
             sep_char = '+' if np.argmax(pred) == label else '-'
             log.write(sep_char * 40 + '\n')
-            log.write(' '.join(seq))
+            log.write(' '.join(seq) + '\n')
             log.write('label: ' + str(label) + '\n')
             log.write('pred: ' + str(np.argmax(pred)) + '\n')
             log.write('dist: ' + str(pred) + '\n')
@@ -328,10 +329,10 @@ for epoch_i in range(0, ARGS.epochs):
     acc = sklearn.metrics.accuracy_score(all_labels, np.argmax(all_preds, axis=1))
     auc = sklearn.metrics.roc_auc_score(all_labels, all_preds[:, 1])
 
-    writer.add_scalar('eval/acc', acc, epoch)
-    writer.add_scalar('eval/auc', auc, epoch)
-    writer.add_scalar('eval/f1', f1, epoch)
-    writer.add_scalar('eval/loss', f1, epoch)
+    writer.add_scalar('eval/acc', acc, epoch_i)
+    writer.add_scalar('eval/auc', auc, epoch_i)
+    writer.add_scalar('eval/f1', f1, epoch_i)
+    writer.add_scalar('eval/loss', f1, epoch_i)
 
     print("  Loss: {0:.2f}".format(avg_loss))
     print("  Accuracy: {0:.2f}".format(acc))

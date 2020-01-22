@@ -43,7 +43,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--max_seq_len",
-    default=64,
+    default=512,
     type=int,
     help="max seq len"
 )
@@ -59,15 +59,15 @@ parser.add_argument(
     type=str,
     help="num messages to include in context"
 )
-parser.add_argument(
+parser.add_argument(        # 35 works well
     "--epochs",
-    default=4,
+    default=35,
     type=int,
     help="fine tuning epochs"
 )
 parser.add_argument(
     "--batch_size",
-    default=32,
+    default=16,
     type=int,
     help="fine tuning epochs"
 )
@@ -137,15 +137,46 @@ def get_raw_data(people, papers):
             if author not in winners + losers:
                 continue
 
+
+            context = paper_info["review_consults"][max(0, i - ARGS.context_size) : i]
+            context = [c['text'] for c in context]
             text = consult["text"]
             label = int(author in winners)
-
             # if label == 0 and random.random() > 0.4:
             #     continue    
-
-
+            out['contexts'].append(context)
             out['sentences'].append(text)
             out['labels'].append(label)
+
+    # get ids and truncate/pad
+    for sent, context in zip(out['sentences'], out['contexts']):
+        encoded_sent = tokenizer.encode(sent, add_special_tokens=True)
+        if len(context) > 0 and len(encoded_sent) < ARGS.max_seq_len:
+            encoded_sent = encoded_sent[1:] # strip [CLS]
+            for ci in context[::-1]:
+                encoded_ci = tokenizer.encode(ci, add_special_tokens=False)
+                encoded_sent = encoded_ci + [102] + encoded_sent # add [SEP]
+            # front-truncate if over here, and add [CLS]
+            encoded_sent = encoded_sent[-(ARGS.max_seq_len - 1):]
+            encoded_sent = [101] + encoded_sent
+
+        # TODO HERE
+        print(encoded_sent)
+        print(encoded_sent.split(102))
+        quit()
+        out['input_ids'].append(encoded_sent)
+
+    # back-truncate
+
+    out['input_ids'] = pad_sequences(
+        out['input_ids'], 
+        maxlen=ARGS.max_seq_len, 
+        dtype="long", 
+        value=0, 
+        truncating="post", 
+        padding="post")
+
+
 
     return out
 

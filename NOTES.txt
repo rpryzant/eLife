@@ -1,0 +1,14 @@
+
+TRY PRE/POST TRUNCATION, ETC
+
+bert 35 epochs predicting winner (1) from email (no context). max seq len 64
+	pred 1: 335
+	pred 0: 595
+
+	pred class counts exactly match albel class counts but not always
+		perfect match??
+
+	mediocre at best 
+		acc: 0.58
+		auc: 0.57
+		f1:  0.43

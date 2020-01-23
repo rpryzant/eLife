@@ -21,7 +21,7 @@ import argparse
 import os
 import scipy
 import sklearn
-
+import math
 
 CUDA = (torch.cuda.device_count() > 0)
 
@@ -59,15 +59,15 @@ parser.add_argument(
     type=str,
     help="num messages to include in context"
 )
-parser.add_argument(        # 35 works well
+parser.add_argument(
     "--epochs",
-    default=35,
+    default=70,
     type=int,
     help="fine tuning epochs"
 )
 parser.add_argument(
     "--batch_size",
-    default=16,
+    default=10,
     type=int,
     help="fine tuning epochs"
 )
@@ -83,6 +83,22 @@ parser.add_argument(
     type=int,
     help="fine tuning epochs"
 )
+parser.add_argument(
+    "--length_discard",
+    action='store_true',
+    help="discard examples that are too long"
+)
+parser.add_argument(
+    "--include_metadata",
+    action='store_true',
+    help="discard examples that are too long"
+)
+parser.add_argument(
+    "--downsample",
+    default=0.4,
+    type=float,
+    help="1-p where p = prop examples to throw out"
+)
 ARGS = parser.parse_args()
 
 
@@ -90,6 +106,35 @@ random.seed(ARGS.seed)
 np.random.seed(ARGS.seed)
 torch.manual_seed(ARGS.seed)
 torch.cuda.manual_seed_all(ARGS.seed)
+
+
+
+
+# this doesn't help
+def get_time(dt_string):
+    x = datetime.datetime.strptime(dt_string, '%Y-%m-%d %H:%M:%S.%f')
+    hour = x.hour
+    if hour < 4:
+        return "wee_morning"
+    elif hour < 8:
+        return 'early_am'
+    elif hour < 12:
+        return 'am'
+    elif hour < 16:
+        return "early_pm"
+    elif hour < 20:
+        return 'pm'
+    else:
+        return 'night'
+
+def get_order(idx, total):
+    x = total / 3
+    if idx < x:
+        return "order_early"
+    elif idx < (x * 2):
+        return "order_mid"
+    else:
+        return "order_late"
 
 
 
@@ -123,6 +168,7 @@ def get_raw_data(people, papers):
     with open(papers) as f:
         papers = list(json.load(f).items())
 
+    # pull out the raw sequences from data
     for pid, paper_info in papers:
         winners = paper_info["winning_reviewers"]
         losers = paper_info["losing_reviewers"]
@@ -136,38 +182,68 @@ def get_raw_data(people, papers):
                 continue
             if author not in winners + losers:
                 continue
-
-
+            ###################
+            # (1) get raw inputs 
             context = paper_info["review_consults"][max(0, i - ARGS.context_size) : i]
             context = [c['text'] for c in context]
             text = consult["text"]
             label = int(author in winners)
-            # if label == 0 and random.random() > 0.4:
-            #     continue    
+
+            order = get_order(i, len(paper_info["review_consults"]))
+            time = get_time(consult['date'])
+            gender = people[consult['author']]['gender']
+            try:
+                university = people[consult['author']]['institution'].strip()
+            except AttributeError:
+                university = 'unknown'
+            experience = str(round(math.log(len(people[consult['author']]['pids'])), 3))
+
+            metadata = 'time: %s; gender: %s; university: %s; experience: %s order: %s' % (
+                time, gender, university, experience, order)
+
+            # downsample negatives
+            if label == 0 and random.random() > ARGS.downsample:
+                continue    
+
+            ###################
+            # (2) get input ids from inputs 
+            sent = text + ' ' + metadata if ARGS.include_metadata else text
+            encoded_sent = tokenizer.encode(sent, add_special_tokens=True)
+
+            seg_id = 0
+            segment_ids = [seg_id % 2] * len(encoded_sent)
+            seg_id += 1
+
+            # add context if needed
+            if len(context) > 0 and len(encoded_sent) < ARGS.max_seq_len:
+                encoded_sent = encoded_sent[1:] # strip [CLS]
+                segment_ids = segment_ids[1:]
+
+                for ci in context[::-1]:
+                    encoded_ci = tokenizer.encode(ci, add_special_tokens=False)
+                    encoded_sent = encoded_ci + [102] + encoded_sent # add [SEP]
+                    segment_ids = ([seg_id % 2] * (len(encoded_ci) + 1)) + segment_ids
+                    seg_id += 1
+
+                # front-truncate if over here so that tgt sentence doesn't get chopped off. 
+                # and add [CLS] back in
+                encoded_sent = encoded_sent[-(ARGS.max_seq_len - 1):]
+                segment_ids = segment_ids[-(ARGS.max_seq_len - 1):]
+
+                encoded_sent = [101] + encoded_sent
+                segment_ids = [segment_ids[0]] + segment_ids
+
+            if ARGS.length_discard and len(encoded_sent) >= ARGS.max_seq_len:
+                continue
+
+            out['segment_ids'].append(segment_ids)
+            out['input_ids'].append(encoded_sent)
             out['contexts'].append(context)
             out['sentences'].append(text)
             out['labels'].append(label)
+            out['metadata'].append(metadata)
 
-    # get ids and truncate/pad
-    for sent, context in zip(out['sentences'], out['contexts']):
-        encoded_sent = tokenizer.encode(sent, add_special_tokens=True)
-        if len(context) > 0 and len(encoded_sent) < ARGS.max_seq_len:
-            encoded_sent = encoded_sent[1:] # strip [CLS]
-            for ci in context[::-1]:
-                encoded_ci = tokenizer.encode(ci, add_special_tokens=False)
-                encoded_sent = encoded_ci + [102] + encoded_sent # add [SEP]
-            # front-truncate if over here, and add [CLS]
-            encoded_sent = encoded_sent[-(ARGS.max_seq_len - 1):]
-            encoded_sent = [101] + encoded_sent
-
-        # TODO HERE
-        print(encoded_sent)
-        print(encoded_sent.split(102))
-        quit()
-        out['input_ids'].append(encoded_sent)
-
-    # back-truncate
-
+    # truncate + pad
     out['input_ids'] = pad_sequences(
         out['input_ids'], 
         maxlen=ARGS.max_seq_len, 
@@ -176,30 +252,20 @@ def get_raw_data(people, papers):
         truncating="post", 
         padding="post")
 
+    out['segment_ids'] = pad_sequences(
+        out['segment_ids'], 
+        maxlen=ARGS.max_seq_len, 
+        dtype="long", 
+        value=0, 
+        truncating="post", 
+        padding="post")
 
+    # get attn masks
+    for sent in out['input_ids']:
+        mask = [int(tok_id > 0) for tok_id in sent]
+        out['attn_masks'].append(mask)
 
     return out
-
-
-def sentences2ids(sentences, tokenizer):
-
-    input_ids = []
-
-    for sent in sentences:
-        # prepends cls and appends sep
-        encoded_sent = tokenizer.encode(sent, add_special_tokens = True)
-        input_ids.append(encoded_sent)
-    input_ids = pad_sequences(input_ids, maxlen=ARGS.max_seq_len, dtype="long", 
-                              value=0, truncating="post", padding="post")
-    return input_ids
-
-def ids2masks(input_ids):
-    attention_masks = []
-    for sent in input_ids:
-        att_mask = [int(token_id > 0) for token_id in sent]
-        attention_masks.append(att_mask)
-    return attention_masks
-
 
 
 def build_dataloader(*args, sampler='random'):
@@ -224,24 +290,19 @@ tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', do_lower_case=Tru
 
 if os.path.exists(ARGS.working_dir + "/data.cache.pkl"):
     data = pickle.load(open(ARGS.working_dir + "/data.cache.pkl", 'rb'))
-    input_ids = pickle.load(open(ARGS.working_dir + "/ids.cache.pkl", 'rb'))
 else:
     data = get_raw_data(ARGS.people, ARGS.papers)
-    input_ids = sentences2ids(data['sentences'], tokenizer)
-
     pickle.dump(data, open(ARGS.working_dir + "/data.cache.pkl", 'wb'))
-    pickle.dump(input_ids, open(ARGS.working_dir + "/ids.cache.pkl", 'wb'))
 
-masks = ids2masks(input_ids)
-
-train_inputs, test_inputs, train_labels, test_labels, train_masks, test_masks = train_test_split(
-    input_ids, data['labels'], masks, 
+train_inputs, test_inputs, train_labels, test_labels, train_masks, test_masks, train_segs, test_segs = train_test_split(
+    data['input_ids'], data['labels'], data['attn_masks'], data['segment_ids'],
     random_state=ARGS.seed, test_size=0.1)
 
 train_dataloader = build_dataloader(
-    train_inputs, train_labels, train_masks)
+    train_inputs, train_labels, train_masks, train_segs)
 test_dataloader = build_dataloader(
-    test_inputs, test_labels, test_masks, sampler='order')
+    test_inputs, test_labels, test_masks, test_segs,
+    sampler='order')
 
 model = BertForSequenceClassification.from_pretrained(
     "bert-base-uncased",
@@ -280,8 +341,7 @@ for epoch_i in range(0, ARGS.epochs):
 
         if CUDA:
             batch = (x.cuda() for x in batch)            
-        input_ids, labels, masks = batch
-
+        input_ids, labels, masks, segs = batch
         model.zero_grad()        
 
         outputs = model(
@@ -321,12 +381,12 @@ for epoch_i in range(0, ARGS.epochs):
 
         if CUDA:
             batch = (x.cuda() for x in batch)            
-        input_ids, labels, masks = batch
+        input_ids, labels, masks, segs = batch
 
         with torch.no_grad():        
             outputs = model(
                 input_ids,
-                token_type_ids=None, 
+                token_type_ids=segs, 
                 attention_mask=masks, 
                 labels=labels)
         loss, logits, attns = outputs

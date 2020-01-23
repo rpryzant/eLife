@@ -1,4 +1,40 @@
 
+
+======= weds 1/22/20
+
+
+
+First set of big sweeps:
+
+	TODO DISCARD BY LENGTH!!!
+	run0 jag23
+	python predict_bert5.py --working_dir seqlen512
+	python predict_bert5.py --working_dir seqlen64 --max_seq_len 64
+	python predict_bert5.py --working_dir seqlen512_meta --include_metadata
+	python predict_bert5.py --working_dir seqlen64_meta --include_metadata --max_seq_len 64
+
+	run1 jag24
+	python predict_bert5.py --working_dir seqlen512_down1 --downsample 1.0
+	python predict_bert5.py --working_dir seqlen64_down1 --max_seq_len 64 --downsample 1.0
+	python predict_bert5.py --working_dir seqlen512_meta_down1 --include_metadata --downsample 1.0
+	python predict_bert5.py --working_dir seqlen64_meta_down1 --include_metadata --max_seq_len 64 --downsample 1.0
+
+	run2 jag6
+	python predict_bert5.py --working_dir seqlen512_discard --length_discard
+	python predict_bert5.py --working_dir seqlen64_discard --max_seq_len 64 --length_discard
+	python predict_bert5.py --working_dir seqlen512_meta_discard --include_metadata --length_discard
+	python predict_bert5.py --working_dir seqlen64_meta_discard --include_metadata --max_seq_len 64 --length_discard
+
+	run3 jag7
+	python predict_bert5.py --working_dir seqlen512_down1_discard --downsample 1.0 --length_discard
+	python predict_bert5.py --working_dir seqlen64_down1_discard --max_seq_len 64 --downsample 1.0 --length_discard
+	python predict_bert5.py --working_dir seqlen512_meta_down1_discard --include_metadata --downsample 1.0 --length_discard
+	python predict_bert5.py --working_dir seqlen64_meta_down1_discard --include_metadata --max_seq_len 64 --downsample 1.0 --length_discard
+
+
+
+
+
 TRY PRE/POST TRUNCATION, ETC
 
 bert 35 epochs predicting winner (1) from email (no context). max seq len 64

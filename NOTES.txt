@@ -1,5 +1,38 @@
 
 
+
+====== Tues 1/28
+sampling 15 from 
+	elife
+
+		note seems like lots of people say they're travelling...does this 
+			go not in their favor??
+
+		good
+			21032
+			6545
+			39169
+			13479
+				"I think the paper should be rejected (I fail to see what you and Alain are so excited about and the proposed additional analysis is not trivial) but don't really care that much.  So whatever you send is fine. "
+		bad
+			39186
+			37462
+			4690
+			21073
+			44306
+			3346
+			33432
+			9376
+			27958
+			32303
+			4498
+
+
+
+	https://en.wikipedia.org/wiki/Wikipedia:Articles_for_deletion/Log/2019_September_27
+
+
+
 ====== mon 1/27
 21032 is a good paper
 in geneal though the data doesn't have what we want
